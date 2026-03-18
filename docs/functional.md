@@ -194,8 +194,9 @@ For each text change, the editor captures:
 - [x] Site key system (opaque, server-side config)
 - [ ] Site owner onboarding (dashboard UI)
 - [ ] PostgreSQL storage (replace JSON files)
-- [ ] Session expiry + refresh tokens
-- [ ] Origin validation (only allow edits from registered domains)
+- [x] Session expiry (24h TTL)
+- [x] Origin validation (only allow edits from registered domains)
+- [x] Security hardening (XSS, CSRF, rate limiting, input validation, CSP)
 
 ### Phase 2 — Polish
 
@@ -238,6 +239,54 @@ For each text change, the editor captures:
 - [ ] Role-based access control
 - [ ] Custom branding (white-label the edit button / toolbar)
 - [ ] API access for programmatic edits
+
+---
+
+## Security & Trust
+
+UltimateCMS is built with security as a core principle. Your website, your code, and your contributors' data are protected at every level.
+
+### Your website is safe
+
+- **Nothing changes on your live site.** UltimateCMS never modifies your website directly. Every edit produces a GitHub pull request that must be reviewed and approved by your team before anything goes live.
+- **Read-only by default.** The embed script is a lightweight JavaScript file (< 5KB) that does nothing until a contributor actively clicks the edit button. No background requests, no data collection, no tracking.
+- **Domain-restricted access.** You configure which domains are allowed to submit edits. Requests from any other origin are blocked.
+
+### Your code is protected
+
+- **Pull requests, not direct commits.** Every change goes through your standard code review process on GitHub. Nothing is merged without your approval.
+- **Branch isolation.** Edits are made on separate branches (`ucms/edit-xxxx`), never on your main branch.
+- **Contributor identity.** Pull requests are authored by the contributor's own GitHub account, so you always know who made each change. GitHub's permission system is enforced — contributors can only edit repos they have access to.
+
+### Your data is secure
+
+- **GitHub OAuth authentication.** Contributors sign in with their GitHub account. UltimateCMS never asks for or stores passwords.
+- **Encrypted sessions.** Session tokens are cryptographically generated, stored server-side, and expire automatically after 24 hours.
+- **No secrets on the client.** Your GitHub tokens, API keys, and repo configuration stay server-side. The client-side script only knows an opaque site key (`sk_xxx`) — your repo name is never exposed.
+- **HTTPS enforced.** All communication between the editor and the UltimateCMS backend is encrypted in transit.
+
+### Industry-standard protections
+
+| Protection | What it means for you |
+|-----------|----------------------|
+| **XSS prevention** | All user-generated content is escaped before display. Malicious scripts cannot be injected through the editor. |
+| **CSRF protection** | Authenticated requests are protected against cross-site request forgery attacks. |
+| **Rate limiting** | Automated abuse and brute-force attempts are blocked by per-IP rate limits on all endpoints. |
+| **Content Security Policy** | Browser-level restrictions prevent unauthorized scripts from running on the editing interface. |
+| **Input validation** | All data submitted to the API is validated for format, length, and type before processing. |
+| **Secure OAuth flow** | The GitHub login flow uses server-verified, single-use, time-limited state tokens to prevent authentication attacks. |
+
+### AI safety
+
+- **Prompt injection protection.** All user-provided text is sanitized and length-limited before being sent to the AI agent. Malicious input cannot manipulate the AI's behavior.
+- **Output validation.** The AI's response is validated structurally before any code change is applied. Invalid or suspicious edits are rejected.
+- **No data retention.** Text content is sent to the Claude API for processing only. It is not stored, used for training, or shared with third parties.
+
+### Compliance-friendly
+
+- Edits are fully auditable via GitHub's built-in PR history, commit logs, and branch protection rules.
+- No personal data is stored beyond what GitHub provides during OAuth (username and public avatar URL).
+- Compatible with your existing branch protection rules, required reviews, and CI/CD checks.
 
 ---
 

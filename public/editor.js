@@ -8,6 +8,24 @@
   if (window.__ultimateCMS && !window.__ucmsConfig) return;
   window.__ultimateCMS = true;
 
+  // --- Security: HTML escape helper ---
+  function escapeHtml(str) {
+    if (!str) return '';
+    const div = document.createElement('div');
+    div.appendChild(document.createTextNode(String(str)));
+    return div.innerHTML;
+  }
+
+  // --- Security: Validate URL (must be http/https) ---
+  function isValidUrl(str) {
+    try {
+      const url = new URL(str);
+      return url.protocol === 'http:' || url.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  }
+
   // --- Config: from embed script (ucms.js) or manual bookmarklet ---
   const STORAGE_KEY = 'ultimatecms_config';
   const embedConfig = window.__ucmsConfig; // set by ucms.js
@@ -80,7 +98,7 @@
 
     <div class="ucms-left">
       <span class="ucms-logo">UltimateCMS</span>
-      <span class="ucms-page">${location.pathname}</span>
+      <span class="ucms-page" id="ucms-page-path"></span>
       <span class="ucms-status" id="ucms-status">Click any text to edit</span>
     </div>
     <div class="ucms-right">
@@ -93,6 +111,9 @@
   `;
   document.body.appendChild(toolbar);
 
+  // Set page path via textContent (safe from XSS)
+  document.getElementById('ucms-page-path').textContent = location.pathname;
+
   // ============================================
   // CONFIG MODAL
   // ============================================
@@ -104,27 +125,33 @@
       <h3>UltimateCMS — Configuration</h3>
       <div class="ucms-field">
         <label>API URL</label>
-        <input type="text" id="ucms-api-url" placeholder="https://your-app.com" value="${config.api_url}">
+        <input type="url" id="ucms-api-url" placeholder="https://your-app.com">
         <small>Your UltimateCMS backend URL</small>
       </div>
       <div class="ucms-field">
         <label>GitHub Repository</label>
-        <input type="text" id="ucms-repo" placeholder="owner/repo" value="${config.repo}">
+        <input type="text" id="ucms-repo" placeholder="owner/repo" pattern="[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+">
       </div>
       <div class="ucms-field-row">
         <div class="ucms-field">
           <label>Branch</label>
-          <input type="text" id="ucms-branch" value="${config.branch}">
+          <input type="text" id="ucms-branch">
         </div>
         <div class="ucms-field">
           <label>GitHub Token</label>
-          <input type="password" id="ucms-github-token" placeholder="ghp_xxx" value="${config.github_token}">
+          <input type="password" id="ucms-github-token" placeholder="ghp_xxx">
         </div>
       </div>
       <button class="ucms-btn ucms-btn-primary" id="ucms-config-save" style="width:100%;padding:10px;margin-top:8px">Save & Close</button>
     </div>
   `;
   document.body.appendChild(configOverlay);
+
+  // Populate config fields safely via .value (not innerHTML)
+  document.getElementById('ucms-api-url').value = config.api_url || '';
+  document.getElementById('ucms-repo').value = config.repo || '';
+  document.getElementById('ucms-branch').value = config.branch || '';
+  document.getElementById('ucms-github-token').value = config.github_token || '';
 
   // ============================================
   // RESULT MODAL
@@ -348,11 +375,7 @@
     }
 
     const resultPanel = document.getElementById('ucms-result-panel');
-    resultPanel.innerHTML = `
-      <h3>Submitting changes...</h3>
-      <div class="ucms-spinner"></div>
-      <p>The AI agent is analyzing your codebase and creating a pull request.</p>
-    `;
+    showResultPanel(resultPanel, 'loading');
     resultOverlay.classList.add('open');
 
     // Build payload with full context — no sensitive info, just the site key
@@ -378,23 +401,63 @@
 
       const data = await res.json();
 
-      if (data.pr_url) {
-        resultPanel.innerHTML = `
-          <h3 style="color:#34D399">Pull request created!</h3>
-          <p>Your changes have been submitted as a pull request. Review and merge when ready.</p>
-          <a href="${data.pr_url}" target="_blank" rel="noopener">${data.pr_url}</a>
-          <br><br>
-          <button class="ucms-btn" onclick="document.getElementById('ucms-result-overlay').classList.remove('open'); location.reload();">Close</button>
-        `;
+      if (data.pr_url && isValidUrl(data.pr_url)) {
+        showResultPanel(resultPanel, 'success', data.pr_url);
       } else {
         throw new Error(data.error || 'Unknown error');
       }
     } catch (err) {
-      resultPanel.innerHTML = `
-        <h3 style="color:#F87171">Error</h3>
-        <p>${err.message}</p>
-        <button class="ucms-btn" onclick="document.getElementById('ucms-result-overlay').classList.remove('open')">Close</button>
-      `;
+      showResultPanel(resultPanel, 'error', err.message);
+    }
+  }
+
+  // Safely render result panel content without innerHTML injection
+  function showResultPanel(panel, type, data) {
+    // Clear previous content
+    panel.textContent = '';
+
+    if (type === 'loading') {
+      const h3 = document.createElement('h3');
+      h3.textContent = 'Submitting changes...';
+      const spinner = document.createElement('div');
+      spinner.className = 'ucms-spinner';
+      const p = document.createElement('p');
+      p.textContent = 'The AI agent is analyzing your codebase and creating a pull request.';
+      panel.append(h3, spinner, p);
+    } else if (type === 'success') {
+      const h3 = document.createElement('h3');
+      h3.style.color = '#34D399';
+      h3.textContent = 'Pull request created!';
+      const p = document.createElement('p');
+      p.textContent = 'Your changes have been submitted as a pull request. Review and merge when ready.';
+      const a = document.createElement('a');
+      a.href = data;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.textContent = data;
+      const br1 = document.createElement('br');
+      const br2 = document.createElement('br');
+      const btn = document.createElement('button');
+      btn.className = 'ucms-btn';
+      btn.textContent = 'Close';
+      btn.addEventListener('click', () => {
+        resultOverlay.classList.remove('open');
+        location.reload();
+      });
+      panel.append(h3, p, a, br1, br2, btn);
+    } else if (type === 'error') {
+      const h3 = document.createElement('h3');
+      h3.style.color = '#F87171';
+      h3.textContent = 'Error';
+      const p = document.createElement('p');
+      p.textContent = data; // textContent is safe — no HTML interpretation
+      const btn = document.createElement('button');
+      btn.className = 'ucms-btn';
+      btn.textContent = 'Close';
+      btn.addEventListener('click', () => {
+        resultOverlay.classList.remove('open');
+      });
+      panel.append(h3, p, btn);
     }
   }
 

@@ -2,6 +2,8 @@ require 'faraday'
 require 'json'
 require 'securerandom'
 
+require_relative 'sanitize'
+
 module UltimateCMS
   class EditAgent
     CLAUDE_API = 'https://api.anthropic.com/v1/messages'
@@ -36,12 +38,17 @@ module UltimateCMS
       branch_name = "ucms/edit-#{SecureRandom.hex(4)}"
       @github.create_branch(branch_name)
 
-      # 5. Apply each edit
+      # 5. Apply each edit — use Regexp.escape for safe literal string matching
       edits.each do |edit|
         file = file_contents[edit['file']]
         next unless file
 
-        new_content = file[:content].sub(edit['old'], edit['new'])
+        # Validate edit has required fields
+        next unless edit['old'].is_a?(String) && edit['new'].is_a?(String) && edit['file'].is_a?(String)
+
+        # Use Regexp.escape to treat the old string as a literal (not a regex pattern)
+        escaped_old = Regexp.escape(edit['old'])
+        new_content = file[:content].sub(Regexp.new(escaped_old), edit['new'].gsub('\\', '\\\\\\\\'))
 
         # Verify the substitution actually changed something
         next if new_content == file[:content]
@@ -60,8 +67,6 @@ module UltimateCMS
       end
 
       # 6. Create a PR
-      change_summary = changes.map { |c| "- \"#{truncate(c['old_text'], 40)}\" → \"#{truncate(c['new_text'], 40)}\"" }.join("\n")
-
       pr_url = @github.create_pull_request(
         title: "Content update via UltimateCMS",
         body: build_pr_body(page, changes, edits),
@@ -109,26 +114,44 @@ module UltimateCMS
 
     # Ask Claude to determine the exact edits
     def ask_agent(page, changes, file_contents)
-      # Build the prompt with all context
+      # Build the prompt with all context — sanitize user-provided values
       files_context = file_contents.map do |path, file|
-        "### #{path}\n```\n#{truncate(file[:content], 3000)}\n```"
+        safe_path = Sanitize.sanitize_for_prompt(path, max_length: 200)
+        "### #{safe_path}\n```\n#{truncate(file[:content], 3000)}\n```"
       end.join("\n\n")
 
       changes_context = changes.map.with_index do |change, i|
         ctx = change['context'] || {}
+        old_text = Sanitize.sanitize_for_prompt(change['old_text'])
+        new_text = Sanitize.sanitize_for_prompt(change['new_text'])
+        tag = Sanitize.sanitize_for_prompt(ctx['tag'].to_s, max_length: 20)
+        classes = (ctx['classes'] || []).map { |c| Sanitize.sanitize_for_prompt(c, max_length: 50) }.join(', ')
+        dom_path = Sanitize.sanitize_for_prompt(ctx['dom_path'].to_s, max_length: 300)
+        parent_tag = Sanitize.sanitize_for_prompt(ctx['parent_tag'].to_s, max_length: 20)
+        parent_classes = (ctx['parent_classes'] || []).map { |c| Sanitize.sanitize_for_prompt(c, max_length: 50) }.join(', ')
+        sibling_texts = (ctx['sibling_texts'] || []).map { |s| Sanitize.sanitize_for_prompt(s, max_length: 80) }.join(' | ')
+        section_tag = Sanitize.sanitize_for_prompt(ctx.dig('section', 'tag').to_s, max_length: 20)
+        section_id = ctx.dig('section', 'id') ? '#' + Sanitize.sanitize_for_prompt(ctx.dig('section', 'id'), max_length: 50) : ''
+        section_heading = Sanitize.sanitize_for_prompt(ctx.dig('section', 'heading').to_s, max_length: 80)
+        href = Sanitize.sanitize_for_prompt(ctx['href'].to_s, max_length: 200)
+
         <<~CHANGE
           ## Change #{i + 1}
-          - **Old text:** "#{change['old_text']}"
-          - **New text:** "#{change['new_text']}"
-          - **HTML tag:** <#{ctx['tag']}>
-          - **CSS classes:** #{(ctx['classes'] || []).join(', ')}
-          - **DOM path:** #{ctx['dom_path']}
-          - **Parent tag:** #{ctx['parent_tag']} (classes: #{(ctx['parent_classes'] || []).join(', ')})
-          - **Sibling texts:** #{(ctx['sibling_texts'] || []).join(' | ')}
-          - **Section:** #{ctx.dig('section', 'tag')}#{'#' + ctx.dig('section', 'id') if ctx.dig('section', 'id')} — heading: "#{ctx.dig('section', 'heading')}"
-          - **Link href:** #{ctx['href']}
+          - **Old text:** "#{old_text}"
+          - **New text:** "#{new_text}"
+          - **HTML tag:** <#{tag}>
+          - **CSS classes:** #{classes}
+          - **DOM path:** #{dom_path}
+          - **Parent tag:** #{parent_tag} (classes: #{parent_classes})
+          - **Sibling texts:** #{sibling_texts}
+          - **Section:** #{section_tag}#{section_id} — heading: "#{section_heading}"
+          - **Link href:** #{href}
         CHANGE
       end.join("\n")
+
+      safe_url = Sanitize.sanitize_for_prompt(page['url'].to_s, max_length: 500)
+      safe_path = Sanitize.sanitize_for_prompt(page['path'].to_s, max_length: 300)
+      safe_title = Sanitize.sanitize_for_prompt(page['title'].to_s, max_length: 200)
 
       prompt = <<~PROMPT
         You are an expert at finding where text content lives in web project source code.
@@ -136,9 +159,9 @@ module UltimateCMS
         A user has visually edited text on a rendered website. Your job is to find the EXACT location in the SOURCE CODE where each text change should be applied.
 
         ## Page context
-        - URL: #{page['url']}
-        - Path: #{page['path']}
-        - Title: #{page['title']}
+        - URL: #{safe_url}
+        - Path: #{safe_path}
+        - Title: #{safe_title}
         - Repository: #{@github.owner}/#{@github.repo}
 
         ## Changes made by the user
@@ -175,7 +198,16 @@ module UltimateCMS
       json_match = response.match(/\[[\s\S]*\]/)
       return [] unless json_match
 
-      JSON.parse(json_match[0])
+      edits = JSON.parse(json_match[0])
+
+      # Validate edit structure
+      edits.select do |edit|
+        edit.is_a?(Hash) &&
+          edit['file'].is_a?(String) &&
+          edit['old'].is_a?(String) &&
+          edit['new'].is_a?(String) &&
+          !edit['file'].include?('..') # prevent path traversal
+      end
     rescue JSON::ParserError => e
       []
     end
@@ -199,7 +231,7 @@ module UltimateCMS
         }.to_json
       end
 
-      raise "Claude API error: #{res.status} — #{res.body}" unless res.success?
+      raise "Claude API error: #{res.status}" unless res.success?
 
       body = JSON.parse(res.body)
       body.dig('content', 0, 'text') || ''
@@ -207,15 +239,27 @@ module UltimateCMS
 
     def build_pr_body(page, changes, edits)
       change_lines = changes.map do |c|
-        "- \"#{truncate(c['old_text'], 50)}\" → \"#{truncate(c['new_text'], 50)}\""
+        old_text = Sanitize.escape_markdown(truncate(c['old_text'], 50))
+        new_text = Sanitize.escape_markdown(truncate(c['new_text'], 50))
+        "- \"#{old_text}\" → \"#{new_text}\""
       end.join("\n")
 
-      file_lines = edits.map { |e| "- `#{e['file']}`" }.uniq.join("\n")
+      file_lines = edits.map { |e| "- `#{Sanitize.escape_markdown(e['file'])}`" }.uniq.join("\n")
+
+      safe_path = Sanitize.escape_html(page['path'].to_s)
+      safe_url = page['url'].to_s
+
+      # Validate URL before using in markdown link
+      url_display = if Sanitize.valid_url?(safe_url)
+        "[#{safe_path}](#{safe_url})"
+      else
+        safe_path
+      end
 
       <<~BODY
         ## Content update via UltimateCMS
 
-        **Page:** [#{page['path']}](#{page['url']})
+        **Page:** #{url_display}
 
         ### Changes
         #{change_lines}
@@ -224,7 +268,7 @@ module UltimateCMS
         #{file_lines}
 
         ---
-        *This PR was created automatically by [UltimateCMS](https://github.com) — visual editing with AI-powered source mapping.*
+        *This PR was created automatically by UltimateCMS — visual editing with AI-powered source mapping.*
       BODY
     end
 
