@@ -9,6 +9,8 @@ GEM
       ruby2_keywords (>= 0.0.4)
     faraday-net_http (3.0.2)
     json (2.7.6)
+    jwt (2.10.2)
+      base64
     mustermann (3.0.4)
       ruby2_keywords (~> 0.0.1)
     nio4r (2.7.5)
@@ -37,6 +39,7 @@ DEPENDENCIES
   dotenv (~> 2.8)
   faraday (~> 2.0)
   json
+  jwt (~> 2.7)
   puma (~> 6.0)
   rack-attack (~> 6.0)
   rack-cors (~> 2.0)

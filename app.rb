@@ -11,6 +11,7 @@ require_relative 'lib/github_client'
 require_relative 'lib/edit_agent'
 require_relative 'lib/site_store'
 require_relative 'lib/sanitize'
+require_relative 'lib/jwt_session'
 
 module UltimateCMS
   class App < Sinatra::Base
@@ -166,17 +167,16 @@ module UltimateCMS
       end
       user = JSON.parse(user_res.body)
 
-      # Create session
-      session_token = SecureRandom.hex(32)
-      settings.site_store.save_session(session_token, {
+      # Create JWT session
+      session_token = JwtSession.encode(
         github_token: access_token,
         username: user['login'],
         avatar: user['avatar_url'],
         flow: 'dashboard'
-      })
+      )
 
       # Redirect back to dashboard with token in fragment (not query — fragments aren't sent to server)
-      redirect "/dashboard#token=#{session_token}"
+      redirect "/dashboard#token=#{URI.encode_www_form_component(session_token)}"
     end
 
     # ============================================
@@ -407,13 +407,13 @@ module UltimateCMS
       end
       user = JSON.parse(user_res.body)
 
-      session_token = SecureRandom.hex(32)
-      settings.site_store.save_session(session_token, {
+      session_token = JwtSession.encode(
         github_token: access_token,
         username: user['login'],
         avatar: user['avatar_url'],
+        flow: 'contributor',
         site_key: site_key
-      })
+      )
 
       # Determine allowed origin for postMessage
       site = settings.site_store.get(site_key)
@@ -458,8 +458,8 @@ module UltimateCMS
       session_token = extract_token
       halt 401, json_error('Not authenticated') unless session_token
 
-      contributor = settings.site_store.get_session(session_token)
-      halt 401, json_error('Invalid session') unless contributor
+      contributor = JwtSession.decode(session_token)
+      halt 401, json_error('Invalid or expired session') unless contributor
 
       payload = parse_json_body
       halt 400, json_error('Invalid JSON') unless payload
@@ -576,7 +576,10 @@ module UltimateCMS
       token = extract_token
       halt 401, json_error('Unauthorized') unless token
 
-      sites = settings.site_store.list_for_token(token)
+      session = JwtSession.decode(token)
+      halt 401, json_error('Invalid session') unless session
+
+      sites = settings.site_store.list_for_token(session[:github_token])
       sites.map { |s| { key: s[:key], repo: s[:repo], branch: s[:branch] } }.to_json
     end
 
@@ -586,8 +589,8 @@ module UltimateCMS
       token = extract_token
       halt 401, json_error('Not authenticated') unless token
 
-      session = settings.site_store.get_session(token)
-      halt 401, json_error('Invalid session') unless session
+      session = JwtSession.decode(token)
+      halt 401, json_error('Invalid or expired session') unless session
 
       session
     end
@@ -596,7 +599,8 @@ module UltimateCMS
       auth = request.env['HTTP_AUTHORIZATION']
       return nil unless auth
       token = auth.sub(/^Bearer\s+/i, '')
-      return nil unless token.match?(/\A[a-f0-9]{64}\z/)
+      # Accept JWT format: three base64url segments separated by dots
+      return nil unless token.match?(/\A[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\z/)
       token
     end
 

@@ -230,8 +230,9 @@ This is the core innovation. Uses Claude to map rendered text → source code lo
 
 **Stores:**
 - **Sites** (`data/sites.json`): `sk_xxx → { repo, branch, github_token, allowed_origins, owner, created_at }`
-- **Sessions** (`data/sessions.json`): `session_token → { github_token, username, avatar, site_key, created_at }` — 24-hour TTL, expired sessions rejected automatically
 - **OAuth states** (`data/oauth_states.json`): `nonce → { site_key, flow, created_at }` — 10-minute TTL, single-use, cleaned up on expiry
+
+**Note:** Sessions are no longer stored server-side — they use stateless JWTs (see below).
 
 **Methods:**
 - `create(repo:, branch:, github_token:, allowed_origins:, owner:)` — create a new site
@@ -240,7 +241,44 @@ This is the core innovation. Uses Claude to map rendered text → source code lo
 - `update(key, **attrs)` — update site attributes (branch, allowed_origins)
 - `delete(key)` — remove a site
 
-**To replace in production:** PostgreSQL + Redis for sessions.
+**To replace in production:** PostgreSQL for sites, Redis for OAuth states.
+
+---
+
+### `lib/jwt_session.rb` — Stateless JWT Authentication
+
+**Purpose:** Replaces the server-side session store with signed, stateless JSON Web Tokens.
+
+**How it works:**
+1. On successful GitHub OAuth, the server creates a JWT containing the user's identity and an encrypted GitHub access token
+2. The JWT is sent to the client (via URL fragment for dashboard, or postMessage for contributors)
+3. On every API request, the client sends the JWT in the `Authorization: Bearer` header
+4. The server verifies the signature and expiration — no database/file lookup needed
+
+**JWT payload structure:**
+```json
+{
+  "username": "thibault",
+  "avatar": "https://avatars.githubusercontent.com/u/...",
+  "ght": "<AES-256-GCM encrypted GitHub token>",
+  "flow": "dashboard",
+  "site_key": "sk_xxx (contributor flow only)",
+  "exp": 1710892800,
+  "iat": 1710806400
+}
+```
+
+**Security design:**
+- **Signing:** HMAC-SHA256 (`HS256`) with `JWT_SECRET` — proves the token was issued by the server and hasn't been tampered with
+- **GitHub token encryption:** AES-256-GCM with `TOKEN_ENCRYPTION_KEY` — the `ght` claim is an opaque encrypted blob readable only by the server. This prevents the GitHub access token from being exposed even though JWTs are base64-encoded.
+- **Expiration:** 24h TTL embedded in the `exp` claim, with 30s clock skew tolerance
+- **Client-side decoding:** The dashboard and embed scripts decode the JWT payload client-side to read `username`, `avatar`, and `exp` — eliminating the need for a `/api/owner/me` call in the happy path. The `ght` field is unreadable client-side (encrypted).
+
+**Methods:**
+- `JwtSession.encode(username:, avatar:, github_token:, flow:, site_key:)` → JWT string
+- `JwtSession.decode(jwt_string)` → `{ username:, avatar:, github_token:, flow:, site_key: }` or `nil`
+
+**Trade-off:** JWTs cannot be revoked individually (no server-side state). If revocation becomes critical, a short-lived JWT + refresh token pattern or a deny list would be needed.
 
 ---
 
@@ -251,6 +289,8 @@ This is the core innovation. Uses Claude to map rendered text → source code lo
 | `ANTHROPIC_API_KEY` | Yes | Claude API key for the edit agent |
 | `GITHUB_CLIENT_ID` | Yes | GitHub OAuth App client ID |
 | `GITHUB_CLIENT_SECRET` | Yes | GitHub OAuth App client secret |
+| `JWT_SECRET` | Yes | Secret for signing JWTs (HS256). Any random string, 32+ chars |
+| `TOKEN_ENCRYPTION_KEY` | Yes | AES-256 key for encrypting GitHub tokens in JWTs. Exactly 64 hex characters |
 
 ---
 
@@ -382,11 +422,12 @@ Limits are per IP address via `Rack::Attack`.
 
 ### Authentication & Session Management
 
-- Sessions are created on successful GitHub OAuth and stored server-side
-- **Session TTL: 24 hours** — expired sessions are rejected and cleaned up on access
-- Session tokens are 64-character hex strings generated via `SecureRandom.hex(32)`
-- The contributor's GitHub access token is stored server-side only — never sent back to the client
-- Client-side only stores the opaque session token (in `localStorage`)
+- Sessions use **stateless JWTs** — no server-side session storage
+- **Session TTL: 24 hours** — embedded in the JWT `exp` claim, with 30s clock skew tolerance
+- JWTs are signed with HMAC-SHA256 (`HS256`) using `JWT_SECRET`
+- The contributor's GitHub access token is **AES-256-GCM encrypted** inside the JWT (`ght` claim) — unreadable client-side, decrypted only by the server
+- Client-side stores the JWT in `localStorage` and decodes public claims (`username`, `avatar`, `exp`) for display — no API call needed
+- Client-side checks `exp` before sending requests — expired tokens are cleared automatically
 
 ### Prompt Injection Mitigation
 
@@ -425,6 +466,8 @@ User-provided text in PR bodies is escaped via `Sanitize.escape_markdown()`, pre
 | `rack-protection` | ~> 3.0 | CSRF, session fixation, XSS header protections |
 | `rack-attack` | ~> 6.0 | Rate limiting and throttling |
 | `rack-cors` | ~> 2.0 | CORS enforcement |
+| `jwt` | ~> 2.7 | JWT signing and verification (HS256) |
+| `openssl` (stdlib) | — | AES-256-GCM encryption for GitHub tokens in JWTs |
 
 ### `lib/sanitize.rb` — Security Utility Module
 
