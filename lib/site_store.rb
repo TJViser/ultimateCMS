@@ -7,11 +7,18 @@ module UltimateCMS
   class SiteStore
     SITES_FILE = File.join(__dir__, '..', 'data', 'sites.json')
     SESSIONS_FILE = File.join(__dir__, '..', 'data', 'sessions.json')
+    OAUTH_STATES_FILE = File.join(__dir__, '..', 'data', 'oauth_states.json')
+
+    # Session expiry: 24 hours
+    SESSION_TTL = 86_400
+    # OAuth state expiry: 10 minutes
+    OAUTH_STATE_TTL = 600
 
     def initialize
       Dir.mkdir(File.dirname(SITES_FILE)) rescue nil
       @sites = load_file(SITES_FILE)
       @sessions = load_file(SESSIONS_FILE)
+      @oauth_states = load_file(OAUTH_STATES_FILE)
     end
 
     # --- Sites ---
@@ -39,7 +46,7 @@ module UltimateCMS
       @sites.values.select { |s| s[:github_token] == token }
     end
 
-    # --- Sessions ---
+    # --- Sessions (with TTL) ---
 
     def save_session(token, data)
       @sessions[token] = data.merge(created_at: Time.now.iso8601)
@@ -47,10 +54,52 @@ module UltimateCMS
     end
 
     def get_session(token)
-      @sessions[token]
+      session = @sessions[token]
+      return nil unless session
+
+      # Check expiry
+      created = Time.parse(session[:created_at]) rescue nil
+      if created && (Time.now - created) > SESSION_TTL
+        @sessions.delete(token)
+        save_file(SESSIONS_FILE, @sessions)
+        return nil
+      end
+
+      session
+    end
+
+    # --- OAuth States (CSRF protection) ---
+
+    def save_oauth_state(nonce, data)
+      cleanup_expired_oauth_states
+      @oauth_states[nonce] = data.merge(created_at: Time.now.iso8601)
+      save_file(OAUTH_STATES_FILE, @oauth_states)
+    end
+
+    def get_oauth_state(nonce)
+      state = @oauth_states[nonce]
+      return nil unless state
+
+      # Check expiry
+      created = Time.parse(state[:created_at]) rescue nil
+      return nil if created && (Time.now - created) > OAUTH_STATE_TTL
+
+      state
+    end
+
+    def delete_oauth_state(nonce)
+      @oauth_states.delete(nonce)
+      save_file(OAUTH_STATES_FILE, @oauth_states)
     end
 
     private
+
+    def cleanup_expired_oauth_states
+      @oauth_states.delete_if do |_, state|
+        created = Time.parse(state[:created_at]) rescue nil
+        created && (Time.now - created) > OAUTH_STATE_TTL
+      end
+    end
 
     def load_file(path)
       return {} unless File.exist?(path)

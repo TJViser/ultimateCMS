@@ -7,14 +7,45 @@
   if (window.__ultimateCMS) return;
   window.__ultimateCMS = true;
 
+  // --- Security: HTML escape helper ---
+  function escapeHtml(str) {
+    if (!str) return '';
+    const div = document.createElement('div');
+    div.appendChild(document.createTextNode(String(str)));
+    return div.innerHTML;
+  }
+
+  // --- Security: Validate URL (must be https for avatars) ---
+  function isValidAvatarUrl(str) {
+    try {
+      const url = new URL(str);
+      return url.protocol === 'https:' && url.hostname === 'avatars.githubusercontent.com';
+    } catch {
+      return false;
+    }
+  }
+
   // --- Read site key from script tag ---
   const scriptTag = document.currentScript || document.querySelector('script[data-site]');
   const siteKey = scriptTag?.getAttribute('data-site');
   if (!siteKey) return;
 
+  // Validate site key format
+  if (!/^sk_[a-f0-9]+$/.test(siteKey)) return;
+
   const API_BASE = scriptTag.src.replace(/\/ucms\.js.*$/, '');
   const SESSION_KEY = 'ucms_session';
-  let session = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
+
+  // Load session with validation
+  let session = null;
+  try {
+    const stored = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
+    if (stored && typeof stored.token === 'string' && typeof stored.username === 'string') {
+      session = stored;
+    }
+  } catch {
+    session = null;
+  }
 
   // --- Inject floating edit button ---
   const fab = document.createElement('div');
@@ -85,46 +116,85 @@
   });
 
   function renderLogin() {
-    popup.innerHTML = `
-      <h4>UltimateCMS</h4>
-      <p>Sign in with GitHub to edit this page.</p>
-      <button class="ucms-gh-btn" id="ucms-gh-login">
-        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
-        Sign in with GitHub
-      </button>
+    // Clear and rebuild with DOM methods to avoid innerHTML XSS
+    popup.textContent = '';
+
+    const h4 = document.createElement('h4');
+    h4.textContent = 'UltimateCMS';
+    const p = document.createElement('p');
+    p.textContent = 'Sign in with GitHub to edit this page.';
+
+    const btn = document.createElement('button');
+    btn.className = 'ucms-gh-btn';
+    btn.id = 'ucms-gh-login';
+    btn.innerHTML = `
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+      Sign in with GitHub
     `;
-    document.getElementById('ucms-gh-login').addEventListener('click', startAuth);
+    btn.addEventListener('click', startAuth);
+
+    popup.append(h4, p, btn);
   }
 
   function renderLoggedIn() {
-    popup.innerHTML = `
-      <div class="ucms-logged">
-        <img class="ucms-avatar" src="${session.avatar}" alt="">
-        <span class="ucms-username">${session.username}</span>
-      </div>
-      <button class="ucms-edit-btn" id="ucms-start-edit">Edit this page</button>
-      <button class="ucms-logout" id="ucms-logout">Sign out</button>
-    `;
-    document.getElementById('ucms-start-edit').addEventListener('click', loadEditor);
-    document.getElementById('ucms-logout').addEventListener('click', () => {
+    // Build with DOM methods to avoid XSS via username/avatar
+    popup.textContent = '';
+
+    const loggedDiv = document.createElement('div');
+    loggedDiv.className = 'ucms-logged';
+
+    // Only render avatar if URL is a valid GitHub avatar URL
+    if (session.avatar && isValidAvatarUrl(session.avatar)) {
+      const img = document.createElement('img');
+      img.className = 'ucms-avatar';
+      img.src = session.avatar;
+      img.alt = '';
+      loggedDiv.appendChild(img);
+    }
+
+    const usernameSpan = document.createElement('span');
+    usernameSpan.className = 'ucms-username';
+    usernameSpan.textContent = session.username; // textContent = safe
+    loggedDiv.appendChild(usernameSpan);
+
+    const editBtn = document.createElement('button');
+    editBtn.className = 'ucms-edit-btn';
+    editBtn.id = 'ucms-start-edit';
+    editBtn.textContent = 'Edit this page';
+    editBtn.addEventListener('click', loadEditor);
+
+    const logoutBtn = document.createElement('button');
+    logoutBtn.className = 'ucms-logout';
+    logoutBtn.id = 'ucms-logout';
+    logoutBtn.textContent = 'Sign out';
+    logoutBtn.addEventListener('click', () => {
       session = null;
       localStorage.removeItem(SESSION_KEY);
       popup.classList.remove('open');
     });
+
+    popup.append(loggedDiv, editBtn, logoutBtn);
   }
 
   // --- GitHub OAuth via popup window ---
   function startAuth() {
-    const authUrl = `${API_BASE}/auth/github?site=${siteKey}`;
+    const authUrl = `${API_BASE}/auth/github?site=${encodeURIComponent(siteKey)}`;
     const w = 500, h = 600;
     const left = (screen.width - w) / 2, top = (screen.height - h) / 2;
     const authWindow = window.open(authUrl, 'ucms-auth', `width=${w},height=${h},left=${left},top=${top}`);
 
-    // Listen for the auth callback
+    // Listen for the auth callback — validate origin
     window.addEventListener('message', function handler(e) {
+      // Verify the message comes from our API origin
+      const expectedOrigin = new URL(API_BASE).origin;
+      if (e.origin !== expectedOrigin) return;
       if (e.data?.type !== 'ucms:auth') return;
+
       window.removeEventListener('message', handler);
       authWindow?.close();
+
+      // Validate received data
+      if (typeof e.data.token !== 'string' || typeof e.data.username !== 'string') return;
 
       session = {
         token: e.data.token,

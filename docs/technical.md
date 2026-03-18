@@ -198,7 +198,8 @@ This is the core innovation. Uses Claude to map rendered text → source code lo
 
 **Stores:**
 - **Sites** (`data/sites.json`): `sk_xxx → { repo, branch, github_token, allowed_origins, created_at }`
-- **Sessions** (`data/sessions.json`): `session_token → { github_token, username, avatar, created_at }`
+- **Sessions** (`data/sessions.json`): `session_token → { github_token, username, avatar, site_key, created_at }` — 24-hour TTL, expired sessions rejected automatically
+- **OAuth states** (`data/oauth_states.json`): `nonce → { site_key, created_at }` — 10-minute TTL, single-use, cleaned up on expiry
 
 **To replace in production:** PostgreSQL + Redis for sessions.
 
@@ -239,24 +240,165 @@ bundle exec puma
 ## Known Limitations (Prototype)
 
 1. **No database** — sites and sessions are stored in JSON files. Not safe for concurrent writes.
-2. **No session expiry** — sessions never expire. Need TTL + refresh tokens.
-3. **No origin validation** — `allowed_origins` is stored but not enforced yet.
-4. **GitHub search API rate limits** — 10 requests/minute for unauthenticated, 30 for authenticated. The agent falls back to heuristic file selection when rate-limited.
-5. **String#sub for edits** — replaces the first occurrence only. If the same text appears multiple times in a file, the agent's context helps pick the right one, but the substitution might hit the wrong one.
-6. **No image/media editing** — text only for now.
-7. **No undo** — changes are committed directly. Rollback = revert the PR.
-8. **Single-file edits** — if the same text change needs to happen in multiple files (e.g., i18n), the agent handles it, but the current `String#sub` only patches one occurrence per edit object.
+2. **GitHub search API rate limits** — 10 requests/minute for unauthenticated, 30 for authenticated. The agent falls back to heuristic file selection when rate-limited.
+3. **String#sub for edits** — replaces the first occurrence only. If the same text appears multiple times in a file, the agent's context helps pick the right one, but the substitution might hit the wrong one.
+4. **No image/media editing** — text only for now.
+5. **No undo** — changes are committed directly. Rollback = revert the PR.
+6. **Single-file edits** — if the same text change needs to happen in multiple files (e.g., i18n), the agent handles it, but the current `String#sub` only patches one occurrence per edit object.
 
 ---
 
-## Security Considerations
+## Security Architecture
 
-1. **Site keys are opaque** — no repo info exposed to the client.
-2. **Contributor auth via GitHub OAuth** — no tokens stored client-side except session tokens.
-3. **PRs authored by contributors** — uses their own GitHub token, so permissions are enforced by GitHub.
-4. **Anthropic API key is server-side only** — never sent to the client.
-5. **CORS is open (`*`)** — restrict in production to `allowed_origins` per site.
-6. **GitHub OAuth state parameter** — includes site key but no CSRF protection yet. Add a random nonce verified on callback.
+### Overview
+
+UltimateCMS implements defense-in-depth across all layers: middleware, transport, input validation, output encoding, authentication, and rate limiting. The security stack is built on proven Ruby libraries (`rack-protection`, `rack-attack`) and follows OWASP best practices.
+
+### Security Middleware
+
+| Middleware | Purpose |
+|-----------|---------|
+| `Rack::Protection` | CSRF protection, session hijacking prevention, XSS mitigations |
+| `Rack::Protection::ContentSecurityPolicy` | CSP headers restricting script/style/image/connect sources |
+| `Rack::Attack` | Rate limiting per IP on all sensitive endpoints |
+| `Rack::Cors` | CORS enforcement — per-site `allowed_origins` validation |
+
+### HTTP Security Headers
+
+All responses include the following headers:
+
+| Header | Value | Purpose |
+|--------|-------|---------|
+| `Content-Security-Policy` | `default-src 'self'; script-src 'self'; ...` | Prevents XSS via inline scripts, restricts resource loading |
+| `X-Content-Type-Options` | `nosniff` | Prevents MIME-type sniffing |
+| `X-Frame-Options` | `DENY` | Prevents clickjacking via iframes |
+| `X-XSS-Protection` | `1; mode=block` | Legacy XSS filter (defense-in-depth) |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | Limits referrer leakage |
+| `Permissions-Policy` | `camera=(), microphone=(), geolocation=()` | Disables unnecessary browser APIs |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` | Forces HTTPS (when on HTTPS) |
+
+### XSS Prevention
+
+**Backend (Ruby):**
+- All user-provided values interpolated into HTML (OAuth callback page) are escaped via `Sanitize.escape_js()` — prevents breakout from JavaScript string literals
+- Error messages returned to the client are generic — no raw exception data is exposed
+- Embed script snippets use `Sanitize.escape_html()` for all interpolated values
+- `lib/sanitize.rb` provides centralized `escape_html()`, `escape_js()`, and `escape_markdown()` helpers using `ERB::Util.html_escape` and custom JS escaping
+
+**Frontend (JavaScript):**
+- All dynamic content in `editor.js` is rendered via DOM API (`createElement`, `textContent`, `append`) — never via `innerHTML` with user data
+- `location.pathname` is set via `textContent`, not template interpolation
+- Error messages, PR URLs, and usernames are rendered via `textContent` (no HTML interpretation)
+- Config modal inputs are populated via `.value` property, not `innerHTML`
+- `ucms.js` builds the login/logged-in popup entirely with DOM methods
+- Avatar URLs are validated against `avatars.githubusercontent.com` before rendering as `<img src>`
+- PR URLs are validated with `isValidUrl()` (must be `http:` or `https:`) before rendering as links
+
+### CSRF Protection
+
+- **Rack::Protection** middleware provides framework-level CSRF defense
+- **OAuth state parameter** uses a server-side nonce: `state = "site_key:nonce"`, where the nonce is stored in `SiteStore` and verified on callback
+- Used OAuth states are deleted immediately after validation (single-use)
+- OAuth states expire after 10 minutes
+
+### Input Validation
+
+All API endpoints validate incoming data before processing:
+
+**`POST /api/sites`:**
+- `repo` — must match `owner/repo` format (`/\A[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\z/`)
+- `branch` — max 255 chars, no `..`, no control characters, no special git chars
+- `github_token` — max 500 chars
+- `allowed_origins` — each must be a valid `http:` or `https:` URL
+
+**`POST /api/edit`:**
+- `site_key` — must be a string
+- `page.url` — must be a valid URL
+- `page.path` — must be a string
+- `changes` — must be an array, max 50 items
+- Each change: `old_text` and `new_text` must be strings, max 5000 chars each
+- Request body limited to 1MB
+
+**`GET /auth/github`:**
+- `site` parameter validated against format `/\Ask_[a-f0-9]+\z/`
+
+**Token validation:**
+- Bearer tokens must match `/\A[a-f0-9]{64}\z/` (hex, exactly 64 chars)
+
+### CORS & Origin Enforcement
+
+- CORS is configured per endpoint — only `/api/*`, `/ucms.js`, and `/editor.js` allow cross-origin requests
+- On `POST /api/edit`, the `Origin` header is validated against the site's `allowed_origins` list
+- If a site has no `allowed_origins` configured, same-origin requests are allowed by default
+
+### Rate Limiting
+
+| Endpoint | Limit | Window |
+|----------|-------|--------|
+| `POST /api/edit` | 10 requests | 60 seconds |
+| `POST /api/sites` | 5 requests | 60 seconds |
+| `/auth/*` | 10 requests | 300 seconds |
+
+Limits are per IP address via `Rack::Attack`.
+
+### Authentication & Session Management
+
+- Sessions are created on successful GitHub OAuth and stored server-side
+- **Session TTL: 24 hours** — expired sessions are rejected and cleaned up on access
+- Session tokens are 64-character hex strings generated via `SecureRandom.hex(32)`
+- The contributor's GitHub access token is stored server-side only — never sent back to the client
+- Client-side only stores the opaque session token (in `localStorage`)
+
+### Prompt Injection Mitigation
+
+User-provided text interpolated into the Claude prompt is sanitized via `Sanitize.sanitize_for_prompt()`:
+- Truncated to a max length (500 chars for text, 200 for paths, 20 for tag names)
+- Control characters stripped (except newlines/tabs)
+- Applied to: `old_text`, `new_text`, `tag`, `classes`, `dom_path`, `parent_tag`, `parent_classes`, `sibling_texts`, `section` fields, `href`, page `url`, `path`, `title`
+
+### Regex Injection Prevention
+
+`String#sub` in `edit_agent.rb` uses `Regexp.escape()` on the `old` string returned by Claude, ensuring it is treated as a literal string match — not as a regex pattern.
+
+### Path Traversal Prevention
+
+Edit objects returned by Claude are validated: file paths containing `..` are rejected.
+
+### Secure postMessage Communication
+
+- The OAuth callback page sends the auth token via `postMessage` to a **specific origin** (the site's first `allowed_origin`, or the backend's own URL) — never `'*'`
+- `ucms.js` validates `e.origin` against the expected API origin before accepting postMessage data
+
+### Markdown Injection Prevention
+
+User-provided text in PR bodies is escaped via `Sanitize.escape_markdown()`, preventing injection of malicious markdown (links, images, HTML) into GitHub PR descriptions. URLs used in markdown links are validated before inclusion.
+
+### Error Handling
+
+- API errors return generic messages to the client (`"An error occurred while processing your edit."`)
+- Detailed errors are logged server-side only (`logger.error`)
+- No stack traces, file paths, or internal state are exposed to the client
+
+### Security Dependencies
+
+| Gem | Version | Purpose |
+|-----|---------|---------|
+| `rack-protection` | ~> 3.0 | CSRF, session fixation, XSS header protections |
+| `rack-attack` | ~> 6.0 | Rate limiting and throttling |
+| `rack-cors` | ~> 2.0 | CORS enforcement |
+
+### `lib/sanitize.rb` — Security Utility Module
+
+| Method | Purpose |
+|--------|---------|
+| `escape_html(str)` | HTML entity encoding via `ERB::Util.html_escape` |
+| `escape_js(str)` | JS string literal escaping (backslash, quotes, angle brackets, `/`) |
+| `valid_string?(str, max_length:, pattern:)` | Length + regex validation |
+| `valid_url?(url)` | Validates `http:`/`https:` scheme |
+| `valid_repo?(repo)` | Validates `owner/repo` format |
+| `valid_branch?(branch)` | Validates git branch name constraints |
+| `sanitize_for_prompt(str, max_length:)` | Truncates + strips control chars for safe AI prompt inclusion |
+| `escape_markdown(str)` | Escapes markdown special characters |
 
 ---
 
@@ -270,3 +412,4 @@ bundle exec puma
 | Auth | GitHub OAuth 2.0 |
 | Storage (prototype) | JSON files |
 | Frontend | Vanilla JS (injected) |
+| Security | Rack::Protection, Rack::Attack, CSP, custom sanitization |
