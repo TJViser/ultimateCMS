@@ -41,12 +41,24 @@ module UltimateCMS
 
     use Rack::Cors do
       allow do
+        # Same-origin requests for dashboard API + static assets
         origins do |source, _env|
+          # Allow same-origin always; cross-origin is validated per-endpoint
           source
         end
-        resource '/api/*', headers: :any, methods: [:get, :post, :patch, :delete, :options], credentials: true
+        resource '/api/owner/*', headers: :any, methods: [:get, :post, :patch, :delete, :options], credentials: true
         resource '/ucms.js', headers: :any, methods: [:get]
         resource '/editor.js', headers: :any, methods: [:get]
+      end
+
+      # /api/edit and /api/sites need cross-origin access (called from embedded scripts)
+      allow do
+        origins do |source, _env|
+          # All origins allowed at CORS level; per-site validation in endpoint
+          source
+        end
+        resource '/api/edit', headers: :any, methods: [:post, :options], credentials: true
+        resource '/api/sites', headers: :any, methods: [:get, :post, :options], credentials: true
       end
     end
 
@@ -103,8 +115,7 @@ module UltimateCMS
 
       settings.site_store.save_oauth_state(nonce, {
         site_key: 'dashboard',
-        flow: 'dashboard',
-        created_at: Time.now.iso8601
+        flow: 'dashboard'
       })
 
       redirect_uri = "#{request.base_url}/auth/github/dashboard/callback"
@@ -221,7 +232,7 @@ module UltimateCMS
       end
 
       # Validate allowed_origins
-      allowed_origins = Array(payload['allowed_origins']).reject(&:empty?)
+      allowed_origins = Array(payload['allowed_origins']).select { |o| o.is_a?(String) && !o.empty? }
       allowed_origins.each do |origin|
         unless Sanitize.valid_url?(origin)
           halt 400, json_error("Invalid origin URL: #{Sanitize.escape_html(origin)}")
@@ -231,6 +242,12 @@ module UltimateCMS
       # Limit sites per owner (prototype: max 20)
       existing = settings.site_store.list_for_owner(owner[:username])
       halt 400, json_error('Site limit reached (max 20)') if existing.length >= 20
+
+      # Prevent duplicate site (same repo + branch)
+      duplicate = existing.find { |s| s[:repo] == payload['repo'] && s[:branch] == branch }
+      if duplicate
+        halt 409, json_error("Site already exists for #{payload['repo']} (#{branch})")
+      end
 
       site = settings.site_store.create(
         repo: payload['repo'],
@@ -257,6 +274,11 @@ module UltimateCMS
       owner = authenticate_owner!
       site_key = params['key']
 
+      # Validate key format
+      unless Sanitize.valid_string?(site_key, max_length: 50, pattern: /\Ask_[a-f0-9]+\z/)
+        halt 400, json_error('Invalid site key')
+      end
+
       site = settings.site_store.get(site_key)
       halt 404, json_error('Site not found') unless site
       halt 403, json_error('Not your site') unless site[:owner] == owner[:username]
@@ -274,7 +296,7 @@ module UltimateCMS
       end
 
       if payload.key?('allowed_origins')
-        origins = Array(payload['allowed_origins']).reject(&:empty?)
+        origins = Array(payload['allowed_origins']).reject { |o| !o.is_a?(String) || o.empty? }
         origins.each do |origin|
           unless Sanitize.valid_url?(origin)
             halt 400, json_error("Invalid origin URL: #{Sanitize.escape_html(origin)}")
@@ -284,12 +306,15 @@ module UltimateCMS
       end
 
       updated = settings.site_store.update(site_key, **updates)
+      halt 404, json_error('Site not found') unless updated
+
       {
         key: updated[:key],
         repo: updated[:repo],
         branch: updated[:branch],
         allowed_origins: updated[:allowed_origins] || [],
-        created_at: updated[:created_at]
+        created_at: updated[:created_at],
+        embed_script: "<script src=\"#{Sanitize.escape_html(request.base_url)}/ucms.js\" data-site=\"#{Sanitize.escape_html(updated[:key])}\"></script>"
       }.to_json
     end
 
@@ -298,6 +323,11 @@ module UltimateCMS
       content_type :json
       owner = authenticate_owner!
       site_key = params['key']
+
+      # Validate key format
+      unless Sanitize.valid_string?(site_key, max_length: 50, pattern: /\Ask_[a-f0-9]+\z/)
+        halt 400, json_error('Invalid site key')
+      end
 
       site = settings.site_store.get(site_key)
       halt 404, json_error('Site not found') unless site
@@ -326,8 +356,7 @@ module UltimateCMS
 
       settings.site_store.save_oauth_state(nonce, {
         site_key: site_key,
-        flow: 'contributor',
-        created_at: Time.now.iso8601
+        flow: 'contributor'
       })
 
       redirect_uri = "#{request.base_url}/auth/github/callback"
@@ -522,7 +551,7 @@ module UltimateCMS
         halt 400, json_error('Invalid token')
       end
 
-      allowed_origins = Array(payload['allowed_origins'])
+      allowed_origins = Array(payload['allowed_origins']).select { |o| o.is_a?(String) && !o.empty? }
       allowed_origins.each do |origin|
         unless Sanitize.valid_url?(origin)
           halt 400, json_error("Invalid origin URL: #{Sanitize.escape_html(origin)}")

@@ -467,9 +467,13 @@
   // ============================================
 
   function apiFetch(path, opts = {}) {
-    const headers = {
-      'Content-Type': 'application/json',
-    };
+    const headers = {};
+    const method = opts.method || 'GET';
+
+    // Only set Content-Type when sending a body (avoids unnecessary CORS preflight)
+    if (opts.body) {
+      headers['Content-Type'] = 'application/json';
+    }
 
     const token = opts.token || session?.token;
     if (token) {
@@ -477,7 +481,7 @@
     }
 
     return fetch(`${API_BASE}${path}`, {
-      method: opts.method || 'GET',
+      method,
       headers,
       body: opts.body || undefined,
     });
