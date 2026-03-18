@@ -9,6 +9,22 @@
   let session = null; // { token, username, avatar }
   let sites = [];
 
+  // --- JWT helpers ---
+  function decodeJwtPayload(jwt) {
+    try {
+      const parts = jwt.split('.');
+      if (parts.length !== 3) return null;
+      const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      return JSON.parse(atob(b64));
+    } catch { return null; }
+  }
+
+  function isTokenExpired(jwt) {
+    const claims = decodeJwtPayload(jwt);
+    if (!claims || !claims.exp) return true;
+    return claims.exp < Date.now() / 1000;
+  }
+
   // --- DOM refs ---
   const authScreen = document.getElementById('auth-screen');
   const dashboard = document.getElementById('dashboard');
@@ -29,9 +45,9 @@
     // Check for token in URL fragment (from OAuth callback redirect)
     const hash = location.hash;
     if (hash.startsWith('#token=')) {
-      const token = hash.slice(7);
-      if (/^[a-f0-9]{64}$/.test(token)) {
-        // Fetch user info and store session
+      const token = decodeURIComponent(hash.slice(7));
+      // Accept JWT format (three base64url segments separated by dots)
+      if (/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token) && !isTokenExpired(token)) {
         history.replaceState(null, '', '/dashboard');
         fetchUserAndLogin(token);
         return;
@@ -40,37 +56,40 @@
 
     // Check stored session
     try {
-      session = JSON.parse(localStorage.getItem(SESSION_KEY));
-      if (session && session.token) {
+      const stored = JSON.parse(localStorage.getItem(SESSION_KEY));
+      if (stored && stored.token && !isTokenExpired(stored.token)) {
+        session = stored;
         showDashboard();
         loadSites();
         return;
       }
+      // Token expired — clean up
+      if (stored) localStorage.removeItem(SESSION_KEY);
     } catch {}
 
     showAuth();
   }
 
   async function fetchUserAndLogin(token) {
+    // Decode public claims from JWT (username, avatar) — no API call needed
+    const claims = decodeJwtPayload(token);
+    if (claims && claims.username) {
+      session = { token, username: claims.username, avatar: claims.avatar };
+      localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+      showDashboard();
+      loadSites();
+      return;
+    }
+
+    // Fallback: fetch from API if JWT decode fails
     try {
-      // Fetch user profile and sites in parallel
-      const [meRes, sitesRes] = await Promise.all([
-        apiFetch('/api/owner/me', { token }),
-        apiFetch('/api/owner/sites', { token }),
-      ]);
-
-      if (!meRes.ok || !sitesRes.ok) {
-        showAuth();
-        return;
-      }
-
+      const meRes = await apiFetch('/api/owner/me', { token });
+      if (!meRes.ok) { showAuth(); return; }
       const user = await meRes.json();
       session = { token, username: user.username, avatar: user.avatar };
       localStorage.setItem(SESSION_KEY, JSON.stringify(session));
-
       showDashboard();
-      sites = await sitesRes.json();
-      renderSites();
+      loadSites();
     } catch {
       showAuth();
     }
@@ -467,9 +486,13 @@
   // ============================================
 
   function apiFetch(path, opts = {}) {
-    const headers = {
-      'Content-Type': 'application/json',
-    };
+    const headers = {};
+    const method = opts.method || 'GET';
+
+    // Only set Content-Type when sending a body (avoids unnecessary CORS preflight)
+    if (opts.body) {
+      headers['Content-Type'] = 'application/json';
+    }
 
     const token = opts.token || session?.token;
     if (token) {
@@ -477,7 +500,7 @@
     }
 
     return fetch(`${API_BASE}${path}`, {
-      method: opts.method || 'GET',
+      method,
       headers,
       body: opts.body || undefined,
     });

@@ -210,7 +210,7 @@ For each text change, the editor captures:
 - [x] Site key system (opaque, server-side config)
 - [x] Site owner onboarding (dashboard UI)
 - [ ] PostgreSQL storage (replace JSON files)
-- [x] Session expiry (24h TTL)
+- [x] Session expiry (24h TTL) + JWT-based stateless auth
 - [x] Origin validation (only allow edits from registered domains)
 - [x] Security hardening (XSS, CSRF, rate limiting, input validation, CSP)
 
@@ -277,7 +277,7 @@ UltimateCMS is built with security as a core principle. Your website, your code,
 ### Your data is secure
 
 - **GitHub OAuth authentication.** Contributors sign in with their GitHub account. UltimateCMS never asks for or stores passwords.
-- **Encrypted sessions.** Session tokens are cryptographically generated, stored server-side, and expire automatically after 24 hours.
+- **Signed & encrypted sessions.** Sessions use industry-standard JSON Web Tokens (JWT), signed with HMAC-SHA256. Sensitive data (GitHub access tokens) is encrypted with AES-256-GCM inside the token. Sessions expire automatically after 24 hours.
 - **No secrets on the client.** Your GitHub tokens, API keys, and repo configuration stay server-side. The client-side script only knows an opaque site key (`sk_xxx`) — your repo name is never exposed.
 - **HTTPS enforced.** All communication between the editor and the UltimateCMS backend is encrypted in transit.
 

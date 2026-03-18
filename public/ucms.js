@@ -36,12 +36,32 @@
   const API_BASE = scriptTag.src.replace(/\/ucms\.js.*$/, '');
   const SESSION_KEY = 'ucms_session';
 
-  // Load session with validation
+  // --- JWT helpers ---
+  function decodeJwtPayload(jwt) {
+    try {
+      const parts = jwt.split('.');
+      if (parts.length !== 3) return null;
+      const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      return JSON.parse(atob(b64));
+    } catch { return null; }
+  }
+
+  function isTokenExpired(jwt) {
+    const claims = decodeJwtPayload(jwt);
+    if (!claims || !claims.exp) return true;
+    return claims.exp < Date.now() / 1000;
+  }
+
+  // Load session with validation + expiry check
   let session = null;
   try {
     const stored = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
     if (stored && typeof stored.token === 'string' && typeof stored.username === 'string') {
-      session = stored;
+      if (!isTokenExpired(stored.token)) {
+        session = stored;
+      } else {
+        localStorage.removeItem(SESSION_KEY);
+      }
     }
   } catch {
     session = null;
