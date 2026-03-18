@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UltimateCMS — Edit any website visually</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Inter', -apple-system, sans-serif; background: #0F1117; color: #E4E5E9; min-height: 100vh; }
+
+    .hero { text-align: center; padding: 100px 24px 80px; max-width: 640px; margin: 0 auto; }
+    h1 { font-size: 2.5rem; font-weight: 800; letter-spacing: -0.03em; margin-bottom: 16px; }
+    h1 span { color: #5B8DEF; }
+    .tagline { font-size: 1.15rem; color: #8B8D98; line-height: 1.7; margin-bottom: 48px; }
+
+    .methods { max-width: 800px; margin: 0 auto; padding: 0 24px 80px; display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    .method { background: #1A1D27; border: 1px solid #2E3140; border-radius: 16px; padding: 32px; }
+    .method-tag { font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em; color: #5B8DEF; background: rgba(91,141,239,0.1); padding: 4px 10px; border-radius: 6px; display: inline-block; margin-bottom: 16px; }
+    .method h2 { font-size: 1.1rem; font-weight: 700; margin-bottom: 8px; }
+    .method p { font-size: 0.85rem; color: #8B8D98; line-height: 1.6; margin-bottom: 20px; }
+
+    .code-block { background: #0F1117; border: 1px solid #2E3140; border-radius: 10px; padding: 16px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.75rem; color: #C0C1C7; line-height: 1.7; overflow-x: auto; margin-bottom: 16px; white-space: pre; }
+    .code-block .attr { color: #5B8DEF; }
+    .code-block .str { color: #34D399; }
+    .code-block .tag { color: #F87171; }
+    .code-block .cmt { color: #6B7280; }
+
+    .bookmarklet-link { display: inline-block; padding: 12px 28px; background: #5B8DEF; color: #fff; font-size: 0.85rem; font-weight: 700; border-radius: 10px; text-decoration: none; cursor: grab; transition: all 0.15s; }
+    .bookmarklet-link:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(91,141,239,0.3); }
+
+    .how { max-width: 640px; margin: 0 auto; padding: 0 24px 80px; }
+    .how h2 { font-size: 1.2rem; font-weight: 700; margin-bottom: 24px; text-align: center; }
+    .steps { display: flex; flex-direction: column; gap: 16px; }
+    .step { display: flex; gap: 16px; background: #1A1D27; border: 1px solid #2E3140; border-radius: 12px; padding: 20px; }
+    .step-num { width: 32px; height: 32px; background: rgba(91,141,239,0.1); color: #5B8DEF; font-weight: 700; font-size: 0.85rem; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .step-text { font-size: 0.85rem; color: #C0C1C7; line-height: 1.6; }
+    .step-text strong { color: #E4E5E9; }
+
+    @media (max-width: 640px) {
+      .methods { grid-template-columns: 1fr; }
+      h1 { font-size: 1.8rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="hero">
+    <h1>Edit any website.<br><span>AI finds the code.</span></h1>
+    <p class="tagline">Add one script tag to your site. Contributors click, edit text visually, and UltimateCMS creates a pull request — no matter the framework.</p>
+  </div>
+
+  <div class="methods">
+
+    <div class="method">
+      <span class="method-tag">Recommended</span>
+      <h2>Embed script</h2>
+      <p>Add this to your site. A floating edit button appears for authenticated contributors.</p>
+      <div class="code-block"><span class="cmt">&lt;!-- Add before &lt;/body&gt; --&gt;</span>
+<span class="tag">&lt;script</span>
+  <span class="attr">src</span>=<span class="str">"https://ultimatecms.com/ucms.js"</span>
+  <span class="attr">data-site</span>=<span class="str">"sk_a8f3e2b1c4d5"</span>
+<span class="tag">&gt;&lt;/script&gt;</span></div>
+      <p style="font-size:0.75rem;color:#6B7280">One opaque key. Repo info stays server-side. Like gtag.</p>
+    </div>
+
+    <div class="method">
+      <span class="method-tag">Alternative</span>
+      <h2>Bookmarklet</h2>
+      <p>Drag this button to your bookmarks bar. Works on any site without adding code.</p>
+      <a class="bookmarklet-link" href="javascript:(function(){if(window.__ultimateCMS)return;var s=document.createElement('script');s.src='REPLACE_WITH_YOUR_URL/editor.js';document.body.appendChild(s)})();">
+        Edit this site
+      </a>
+    </div>
+
+  </div>
+
+  <div class="how">
+    <h2>How it works</h2>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-text"><strong>Click any text</strong> on the live website to edit it inline. Modified elements get a green indicator.</div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-text"><strong>Submit your changes.</strong> The old text, new text, and full context (CSS classes, DOM path, section, URL) are sent to the backend.</div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-text"><strong>AI agent analyzes the codebase.</strong> It greps the repo, reads candidate files, and uses Claude to find the exact location in the source — HTML, JSON, Markdown, JSX, i18n files, templates, whatever.</div>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-text"><strong>Pull request created.</strong> The agent edits the source file(s), creates a branch, and opens a PR. Review, approve, merge.</div>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>
