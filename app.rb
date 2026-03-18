@@ -19,8 +19,7 @@ module UltimateCMS
     # SECURITY MIDDLEWARE
     # ============================================
 
-    # Rack::Protection provides CSRF, session hijacking, XSS, and other protections
-    use Rack::Protection, except: [:json_csrf] # json_csrf can interfere with API endpoints
+    use Rack::Protection, except: [:json_csrf]
     use Rack::Protection::ContentSecurityPolicy,
       default_src: "'self'",
       script_src: "'self'",
@@ -29,26 +28,23 @@ module UltimateCMS
       connect_src: "'self' https://api.github.com",
       frame_ancestors: "'none'"
 
-    # Rate limiting
     Rack::Attack.throttle('api/edit', limit: 10, period: 60) do |req|
       req.ip if req.path == '/api/edit' && req.post?
     end
     Rack::Attack.throttle('api/sites', limit: 5, period: 60) do |req|
-      req.ip if req.path == '/api/sites' && req.post?
+      req.ip if req.path.start_with?('/api/owner/sites') && req.post?
     end
     Rack::Attack.throttle('auth', limit: 10, period: 300) do |req|
       req.ip if req.path.start_with?('/auth/')
     end
     use Rack::Attack
 
-    # CORS — enforce per-site allowed origins (default: deny all cross-origin)
     use Rack::Cors do
       allow do
         origins do |source, _env|
-          # Allow same-origin and configured origins; static assets are always allowed
-          source # dynamically validated in before filter
+          source
         end
-        resource '/api/*', headers: :any, methods: [:get, :post, :options], credentials: true
+        resource '/api/*', headers: :any, methods: [:get, :post, :patch, :delete, :options], credentials: true
         resource '/ucms.js', headers: :any, methods: [:get]
         resource '/editor.js', headers: :any, methods: [:get]
       end
@@ -73,14 +69,12 @@ module UltimateCMS
       end
     end
 
-    # Validate Origin for API requests
     before '/api/*' do
       origin = request.env['HTTP_ORIGIN']
-      next unless origin # same-origin requests may not send Origin
+      next unless origin
 
-      # For /api/edit, validate against site's allowed_origins
       if request.path == '/api/edit' && request.post?
-        # Origin will be checked after payload is parsed (in the endpoint)
+        # Origin checked after payload is parsed (in the endpoint)
       end
     end
 
@@ -92,67 +86,229 @@ module UltimateCMS
       send_file File.join(settings.public_folder, 'index.html')
     end
 
+    get '/dashboard' do
+      send_file File.join(settings.public_folder, 'dashboard.html')
+    end
+
     # ============================================
-    # SITE REGISTRATION (site owner calls this)
+    # DASHBOARD AUTH (for site owners)
     # ============================================
 
-    post '/api/sites' do
+    get '/auth/github/dashboard' do
+      client_id = ENV['GITHUB_CLIENT_ID']
+      halt 500, 'GITHUB_CLIENT_ID not configured' unless client_id
+
+      nonce = SecureRandom.hex(16)
+      state = "dashboard:#{nonce}"
+
+      settings.site_store.save_oauth_state(nonce, {
+        site_key: 'dashboard',
+        flow: 'dashboard',
+        created_at: Time.now.iso8601
+      })
+
+      redirect_uri = "#{request.base_url}/auth/github/dashboard/callback"
+
+      redirect "https://github.com/login/oauth/authorize?" + URI.encode_www_form(
+        client_id: client_id,
+        redirect_uri: redirect_uri,
+        state: state,
+        scope: 'repo'
+      )
+    end
+
+    get '/auth/github/dashboard/callback' do
+      code = params['code']
+      state = params['state']
+
+      halt 400, 'Missing code or state' unless code && state
+
+      prefix, nonce = state.split(':', 2)
+      halt 400, 'Invalid state' unless prefix == 'dashboard' && nonce
+
+      stored_state = settings.site_store.get_oauth_state(nonce)
+      halt 403, 'Invalid or expired OAuth state' unless stored_state
+      halt 403, 'State mismatch' unless stored_state[:flow] == 'dashboard'
+
+      settings.site_store.delete_oauth_state(nonce)
+
+      # Exchange code for access token
+      conn = Faraday.new(url: 'https://github.com')
+      res = conn.post('/login/oauth/access_token') do |req|
+        req.headers['Accept'] = 'application/json'
+        req.body = URI.encode_www_form({
+          client_id: ENV['GITHUB_CLIENT_ID'],
+          client_secret: ENV['GITHUB_CLIENT_SECRET'],
+          code: code
+        })
+      end
+
+      token_data = JSON.parse(res.body)
+      access_token = token_data['access_token']
+      halt 401, 'GitHub auth failed' unless access_token
+
+      # Get user info
+      user_conn = Faraday.new(url: 'https://api.github.com')
+      user_res = user_conn.get('/user') do |req|
+        req.headers['Authorization'] = "Bearer #{access_token}"
+        req.headers['Accept'] = 'application/vnd.github.v3+json'
+      end
+      user = JSON.parse(user_res.body)
+
+      # Create session
+      session_token = SecureRandom.hex(32)
+      settings.site_store.save_session(session_token, {
+        github_token: access_token,
+        username: user['login'],
+        avatar: user['avatar_url'],
+        flow: 'dashboard'
+      })
+
+      # Redirect back to dashboard with token in fragment (not query — fragments aren't sent to server)
+      redirect "/dashboard#token=#{session_token}"
+    end
+
+    # ============================================
+    # DASHBOARD API (site owner endpoints)
+    # ============================================
+
+    # Get authenticated owner's profile
+    get '/api/owner/me' do
       content_type :json
+      owner = authenticate_owner!
+
+      {
+        username: owner[:username],
+        avatar: owner[:avatar]
+      }.to_json
+    end
+
+    # List sites for authenticated owner
+    get '/api/owner/sites' do
+      content_type :json
+      owner = authenticate_owner!
+
+      sites = settings.site_store.list_for_owner(owner[:username])
+      sites.map do |s|
+        {
+          key: s[:key],
+          repo: s[:repo],
+          branch: s[:branch],
+          allowed_origins: s[:allowed_origins] || [],
+          created_at: s[:created_at],
+          embed_script: "<script src=\"#{Sanitize.escape_html(request.base_url)}/ucms.js\" data-site=\"#{Sanitize.escape_html(s[:key])}\"></script>"
+        }
+      end.to_json
+    end
+
+    # Create a new site
+    post '/api/owner/sites' do
+      content_type :json
+      owner = authenticate_owner!
 
       payload = parse_json_body
       halt 400, json_error('Invalid JSON') unless payload
 
-      %w[repo branch github_token].each do |f|
-        halt 400, json_error("Missing: #{f}") unless payload[f]
-      end
-
-      # Validate repo format
+      # Validate required fields
+      halt 400, json_error('Missing repository') unless payload['repo'].is_a?(String) && !payload['repo'].empty?
       unless Sanitize.valid_repo?(payload['repo'])
         halt 400, json_error('Invalid repo format. Expected: owner/repo')
       end
 
-      # Validate branch name
-      unless Sanitize.valid_branch?(payload['branch'] || 'main')
+      branch = payload['branch'] || 'main'
+      unless Sanitize.valid_branch?(branch)
         halt 400, json_error('Invalid branch name')
       end
 
-      # Validate github_token format (basic check)
-      unless Sanitize.valid_string?(payload['github_token'], max_length: 500)
-        halt 400, json_error('Invalid token')
-      end
-
-      # Validate allowed_origins (must be valid URLs)
-      allowed_origins = Array(payload['allowed_origins'])
+      # Validate allowed_origins
+      allowed_origins = Array(payload['allowed_origins']).reject(&:empty?)
       allowed_origins.each do |origin|
         unless Sanitize.valid_url?(origin)
           halt 400, json_error("Invalid origin URL: #{Sanitize.escape_html(origin)}")
         end
       end
 
+      # Limit sites per owner (prototype: max 20)
+      existing = settings.site_store.list_for_owner(owner[:username])
+      halt 400, json_error('Site limit reached (max 20)') if existing.length >= 20
+
       site = settings.site_store.create(
         repo: payload['repo'],
-        branch: payload['branch'] || 'main',
-        github_token: payload['github_token'],
-        allowed_origins: allowed_origins
+        branch: branch,
+        github_token: owner[:github_token],
+        allowed_origins: allowed_origins,
+        owner: owner[:username]
       )
 
+      status 201
       {
-        site_key: site[:key],
+        key: site[:key],
+        repo: site[:repo],
+        branch: site[:branch],
+        allowed_origins: site[:allowed_origins],
+        created_at: site[:created_at],
         embed_script: "<script src=\"#{Sanitize.escape_html(request.base_url)}/ucms.js\" data-site=\"#{Sanitize.escape_html(site[:key])}\"></script>"
       }.to_json
     end
 
-    get '/api/sites' do
+    # Update a site
+    patch '/api/owner/sites/:key' do
       content_type :json
-      token = extract_token
-      halt 401, json_error('Unauthorized') unless token
+      owner = authenticate_owner!
+      site_key = params['key']
 
-      sites = settings.site_store.list_for_token(token)
-      sites.map { |s| { key: s[:key], repo: s[:repo], branch: s[:branch] } }.to_json
+      site = settings.site_store.get(site_key)
+      halt 404, json_error('Site not found') unless site
+      halt 403, json_error('Not your site') unless site[:owner] == owner[:username]
+
+      payload = parse_json_body
+      halt 400, json_error('Invalid JSON') unless payload
+
+      updates = {}
+
+      if payload.key?('branch')
+        unless Sanitize.valid_branch?(payload['branch'])
+          halt 400, json_error('Invalid branch name')
+        end
+        updates[:branch] = payload['branch']
+      end
+
+      if payload.key?('allowed_origins')
+        origins = Array(payload['allowed_origins']).reject(&:empty?)
+        origins.each do |origin|
+          unless Sanitize.valid_url?(origin)
+            halt 400, json_error("Invalid origin URL: #{Sanitize.escape_html(origin)}")
+          end
+        end
+        updates[:allowed_origins] = origins
+      end
+
+      updated = settings.site_store.update(site_key, **updates)
+      {
+        key: updated[:key],
+        repo: updated[:repo],
+        branch: updated[:branch],
+        allowed_origins: updated[:allowed_origins] || [],
+        created_at: updated[:created_at]
+      }.to_json
+    end
+
+    # Delete a site
+    delete '/api/owner/sites/:key' do
+      content_type :json
+      owner = authenticate_owner!
+      site_key = params['key']
+
+      site = settings.site_store.get(site_key)
+      halt 404, json_error('Site not found') unless site
+      halt 403, json_error('Not your site') unless site[:owner] == owner[:username]
+
+      settings.site_store.delete(site_key)
+      { status: 'deleted' }.to_json
     end
 
     # ============================================
-    # GITHUB OAUTH (for contributors)
+    # CONTRIBUTOR AUTH (for editing)
     # ============================================
 
     get '/auth/github' do
@@ -161,18 +317,16 @@ module UltimateCMS
 
       halt 500, 'GITHUB_CLIENT_ID not configured' unless client_id
 
-      # Validate site_key format
       unless site_key && Sanitize.valid_string?(site_key, max_length: 50, pattern: /\Ask_[a-f0-9]+\z/)
         halt 400, 'Invalid site key'
       end
 
-      # Generate CSRF-safe state with HMAC
       nonce = SecureRandom.hex(16)
       state = "#{site_key}:#{nonce}"
 
-      # Store state server-side for verification
       settings.site_store.save_oauth_state(nonce, {
         site_key: site_key,
+        flow: 'contributor',
         created_at: Time.now.iso8601
       })
 
@@ -192,7 +346,6 @@ module UltimateCMS
 
       halt 400, 'Missing code or state' unless code && state
 
-      # Validate and verify state to prevent CSRF
       site_key, nonce = state.split(':', 2)
       halt 400, 'Invalid state' unless nonce
 
@@ -200,7 +353,6 @@ module UltimateCMS
       halt 403, 'Invalid or expired OAuth state' unless stored_state
       halt 403, 'State mismatch' unless stored_state[:site_key] == site_key
 
-      # Clean up used state
       settings.site_store.delete_oauth_state(nonce)
 
       # Exchange code for access token
@@ -216,7 +368,6 @@ module UltimateCMS
 
       token_data = JSON.parse(res.body)
       access_token = token_data['access_token']
-
       halt 401, 'GitHub auth failed' unless access_token
 
       # Get user info
@@ -227,7 +378,6 @@ module UltimateCMS
       end
       user = JSON.parse(user_res.body)
 
-      # Create a session token (in production: store in DB / use JWT with expiry)
       session_token = SecureRandom.hex(32)
       settings.site_store.save_session(session_token, {
         github_token: access_token,
@@ -241,16 +391,13 @@ module UltimateCMS
       post_message_origin = if site && site[:allowed_origins]&.any?
         Sanitize.escape_js(site[:allowed_origins].first)
       else
-        # Fallback: use the request's referrer origin or restrict to same origin
         Sanitize.escape_js(request.base_url)
       end
 
-      # Escape all values for safe embedding in JavaScript
       safe_token = Sanitize.escape_js(session_token)
       safe_username = Sanitize.escape_js(user['login'].to_s)
       safe_avatar = Sanitize.escape_js(user['avatar_url'].to_s)
 
-      # Return to the opener window via postMessage with specific origin
       <<~HTML
         <!DOCTYPE html>
         <html>
@@ -279,7 +426,6 @@ module UltimateCMS
     post '/api/edit' do
       content_type :json
 
-      # Authenticate contributor
       session_token = extract_token
       halt 401, json_error('Not authenticated') unless session_token
 
@@ -289,20 +435,17 @@ module UltimateCMS
       payload = parse_json_body
       halt 400, json_error('Invalid JSON') unless payload
 
-      # Validate required fields
       halt 400, json_error('Missing site_key') unless payload['site_key'].is_a?(String)
       halt 400, json_error('Missing page') unless payload['page'].is_a?(Hash)
       halt 400, json_error('Missing changes') unless payload['changes'].is_a?(Array)
       halt 400, json_error('Too many changes') if payload['changes'].length > 50
 
-      # Validate page fields
       page = payload['page']
       unless page['url'].is_a?(String) && page['path'].is_a?(String)
         halt 400, json_error('Invalid page data')
       end
       halt 400, json_error('Invalid page URL') unless Sanitize.valid_url?(page['url'])
 
-      # Validate each change
       payload['changes'].each_with_index do |change, i|
         unless change['old_text'].is_a?(String) && change['new_text'].is_a?(String)
           halt 400, json_error("Change #{i}: missing old_text or new_text")
@@ -315,11 +458,9 @@ module UltimateCMS
         end
       end
 
-      # Look up site config
       site = settings.site_store.get(payload['site_key'])
       halt 404, json_error('Site not found') unless site
 
-      # Validate request origin against site's allowed_origins
       origin = request.env['HTTP_ORIGIN']
       if origin && site[:allowed_origins]&.any?
         unless site[:allowed_origins].include?(origin)
@@ -350,19 +491,82 @@ module UltimateCMS
         { status: 'success', pr_url: result[:pr_url] }.to_json
       rescue => e
         status 500
-        # Never expose raw error messages to the client
         logger.error("Edit failed: #{e.message}")
         json_error('An error occurred while processing your edit. Please try again.')
       end
     end
 
+    # ============================================
+    # LEGACY SITE REGISTRATION (API-only)
+    # ============================================
+
+    post '/api/sites' do
+      content_type :json
+
+      payload = parse_json_body
+      halt 400, json_error('Invalid JSON') unless payload
+
+      %w[repo branch github_token].each do |f|
+        halt 400, json_error("Missing: #{f}") unless payload[f]
+      end
+
+      unless Sanitize.valid_repo?(payload['repo'])
+        halt 400, json_error('Invalid repo format. Expected: owner/repo')
+      end
+
+      unless Sanitize.valid_branch?(payload['branch'] || 'main')
+        halt 400, json_error('Invalid branch name')
+      end
+
+      unless Sanitize.valid_string?(payload['github_token'], max_length: 500)
+        halt 400, json_error('Invalid token')
+      end
+
+      allowed_origins = Array(payload['allowed_origins'])
+      allowed_origins.each do |origin|
+        unless Sanitize.valid_url?(origin)
+          halt 400, json_error("Invalid origin URL: #{Sanitize.escape_html(origin)}")
+        end
+      end
+
+      site = settings.site_store.create(
+        repo: payload['repo'],
+        branch: payload['branch'] || 'main',
+        github_token: payload['github_token'],
+        allowed_origins: allowed_origins
+      )
+
+      {
+        site_key: site[:key],
+        embed_script: "<script src=\"#{Sanitize.escape_html(request.base_url)}/ucms.js\" data-site=\"#{Sanitize.escape_html(site[:key])}\"></script>"
+      }.to_json
+    end
+
+    get '/api/sites' do
+      content_type :json
+      token = extract_token
+      halt 401, json_error('Unauthorized') unless token
+
+      sites = settings.site_store.list_for_token(token)
+      sites.map { |s| { key: s[:key], repo: s[:repo], branch: s[:branch] } }.to_json
+    end
+
     private
+
+    def authenticate_owner!
+      token = extract_token
+      halt 401, json_error('Not authenticated') unless token
+
+      session = settings.site_store.get_session(token)
+      halt 401, json_error('Invalid session') unless session
+
+      session
+    end
 
     def extract_token
       auth = request.env['HTTP_AUTHORIZATION']
       return nil unless auth
       token = auth.sub(/^Bearer\s+/i, '')
-      # Validate token format (hex string)
       return nil unless token.match?(/\A[a-f0-9]{64}\z/)
       token
     end
@@ -370,7 +574,6 @@ module UltimateCMS
     def parse_json_body
       body = request.body.read
       return nil if body.nil? || body.empty?
-      # Limit body size (1MB)
       return nil if body.bytesize > 1_048_576
       JSON.parse(body)
     rescue JSON::ParserError

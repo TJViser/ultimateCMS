@@ -23,14 +23,15 @@ module UltimateCMS
 
     # --- Sites ---
 
-    def create(repo:, branch:, github_token:, allowed_origins: [])
+    def create(repo:, branch:, github_token:, allowed_origins: [], owner: nil)
       key = "sk_#{SecureRandom.hex(8)}"
       site = {
         key: key,
         repo: repo,
         branch: branch,
-        github_token: github_token,  # owner's token (for repo access)
+        github_token: github_token,
         allowed_origins: allowed_origins,
+        owner: owner,
         created_at: Time.now.iso8601
       }
       @sites[key] = site
@@ -44,6 +45,28 @@ module UltimateCMS
 
     def list_for_token(token)
       @sites.values.select { |s| s[:github_token] == token }
+    end
+
+    def list_for_owner(username)
+      @sites.values.select { |s| s[:owner] == username }
+    end
+
+    def update(key, **attrs)
+      site = @sites[key]
+      return nil unless site
+
+      attrs.each do |k, v|
+        site[k] = v unless v.nil?
+      end
+      site[:updated_at] = Time.now.iso8601
+      save_file(SITES_FILE, @sites)
+      site
+    end
+
+    def delete(key)
+      deleted = @sites.delete(key)
+      save_file(SITES_FILE, @sites) if deleted
+      deleted
     end
 
     # --- Sessions (with TTL) ---
