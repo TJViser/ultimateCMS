@@ -128,6 +128,21 @@ window.__ucmsConfig = {
 
 ---
 
+### `public/dashboard.html` + `public/dashboard.js` — Owner Dashboard
+
+**Purpose:** Site management UI for site owners. Accessible at `/dashboard`.
+
+**Behavior:**
+1. If not authenticated → shows GitHub sign-in screen
+2. OAuth flow via `GET /auth/github/dashboard` → GitHub → callback → redirect to `/dashboard#token=xxx`
+3. Dashboard picks up the token from the URL fragment, fetches user profile + sites via API
+4. Session stored in `localStorage` as `ucms_dashboard_session`
+5. Shows site cards with: repo, branch, site key, embed snippet (copy button), allowed origins (add/remove), delete
+6. Empty state shows a 3-step onboarding guide + "Add your first site" button
+7. "Add a site" modal: repo, branch, allowed origins → creates site via API
+
+---
+
 ### `app.rb` — Sinatra API
 
 **Endpoints:**
@@ -135,11 +150,28 @@ window.__ucmsConfig = {
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | GET | `/` | - | Serves landing page |
-| POST | `/api/sites` | - | Register a new site → returns `sk_xxx` |
-| GET | `/api/sites` | Bearer | List sites for authenticated user |
-| GET | `/auth/github` | - | Redirect to GitHub OAuth |
-| GET | `/auth/github/callback` | - | OAuth callback, creates session |
+| GET | `/dashboard` | - | Serves dashboard SPA |
+| GET | `/auth/github/dashboard` | - | GitHub OAuth for site owners (redirect flow) |
+| GET | `/auth/github/dashboard/callback` | - | Dashboard OAuth callback → redirect with token |
+| GET | `/auth/github` | - | GitHub OAuth for contributors (popup flow) |
+| GET | `/auth/github/callback` | - | Contributor OAuth callback → postMessage |
+| GET | `/api/owner/me` | Bearer | Get authenticated owner's profile |
+| GET | `/api/owner/sites` | Bearer | List sites for authenticated owner |
+| POST | `/api/owner/sites` | Bearer | Create a new site |
+| PATCH | `/api/owner/sites/:key` | Bearer | Update site settings (branch, origins) |
+| DELETE | `/api/owner/sites/:key` | Bearer | Delete a site |
+| POST | `/api/sites` | - | Legacy: register a site via API (no auth) |
+| GET | `/api/sites` | Bearer | Legacy: list sites by token |
 | POST | `/api/edit` | Bearer | Main edit endpoint |
+
+**Two OAuth flows:**
+- **Dashboard flow** (site owners): redirect-based. `GET /auth/github/dashboard` → GitHub → callback → redirect to `/dashboard#token=xxx`. Session stored in `localStorage`.
+- **Contributor flow** (editors): popup-based. `GET /auth/github?site=sk_xxx` → GitHub → callback → `postMessage` to opener window. Used by `ucms.js`.
+
+**Dashboard API authorization:**
+- All `/api/owner/*` endpoints require `Authorization: Bearer <session_token>`
+- Site mutations (PATCH, DELETE) verify the authenticated user is the site's owner
+- Sites are limited to 20 per owner (prototype)
 
 **Edit endpoint flow:**
 1. Authenticate via `Authorization: Bearer <session_token>`
@@ -197,9 +229,16 @@ This is the core innovation. Uses Claude to map rendered text → source code lo
 **Current:** JSON files in `/data/` directory (prototype).
 
 **Stores:**
-- **Sites** (`data/sites.json`): `sk_xxx → { repo, branch, github_token, allowed_origins, created_at }`
+- **Sites** (`data/sites.json`): `sk_xxx → { repo, branch, github_token, allowed_origins, owner, created_at }`
 - **Sessions** (`data/sessions.json`): `session_token → { github_token, username, avatar, site_key, created_at }` — 24-hour TTL, expired sessions rejected automatically
-- **OAuth states** (`data/oauth_states.json`): `nonce → { site_key, created_at }` — 10-minute TTL, single-use, cleaned up on expiry
+- **OAuth states** (`data/oauth_states.json`): `nonce → { site_key, flow, created_at }` — 10-minute TTL, single-use, cleaned up on expiry
+
+**Methods:**
+- `create(repo:, branch:, github_token:, allowed_origins:, owner:)` — create a new site
+- `get(key)` — get site by key
+- `list_for_owner(username)` — list sites by owner username
+- `update(key, **attrs)` — update site attributes (branch, allowed_origins)
+- `delete(key)` — remove a site
 
 **To replace in production:** PostgreSQL + Redis for sessions.
 

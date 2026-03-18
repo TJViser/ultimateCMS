@@ -32,16 +32,25 @@ The result is a GitHub pull request, ready for review.
 ### Flow 1: Site Owner — Onboarding
 
 ```
-1. Owner goes to ultimatecms.com
-2. Signs up / logs in with GitHub
-3. Dashboard → "Add a site"
-4. Enters: repository (owner/repo), branch (main), allowed domains
-5. System generates a site key: sk_a8f3e2b1
-6. Owner gets the embed script:
+1. Owner goes to ultimatecms.com and clicks "Dashboard" in the top nav
+2. Clicks "Sign in with GitHub" → GitHub OAuth redirect
+3. After authentication, lands on the dashboard at /dashboard
+4. First visit: sees an empty state with a 3-step onboarding guide
+5. Clicks "Add your first site"
+6. Fills in: repository (owner/repo), branch (main), allowed origins
+7. System creates a site key and shows the embed snippet
+8. Owner clicks "Copy" to copy the script tag:
    <script src="https://ultimatecms.com/ucms.js" data-site="sk_a8f3e2b1"></script>
-7. Owner adds the script to their site's HTML (before </body>)
-8. Done — contributors can now edit
+9. Owner adds the script to their site's HTML (before </body>)
+10. Done — contributors can now edit
 ```
+
+**Dashboard features:**
+- View all registered sites with their keys, repos, and branches
+- Copy embed snippet with one click
+- Manage allowed origins per site (add/remove)
+- Delete sites
+- Session persists across page reloads (24h expiry)
 
 ### Flow 2: Contributor — Editing Content
 
@@ -145,13 +154,20 @@ For each text change, the editor captures:
 | **PR creation** | `POST /repos/.../pulls` |
 | **PR authorship** | Uses contributor's own GitHub token |
 
-### F6: Site Management
+### F6: Site Management & Dashboard
 
-| Action | Detail |
+| Aspect | Detail |
 |--------|--------|
-| **Register site** | `POST /api/sites` → returns `sk_xxx` + embed snippet |
-| **Site config** | Stored server-side: repo, branch, owner token, allowed origins |
+| **Dashboard URL** | `/dashboard` — single-page app for site owners |
+| **Auth** | GitHub OAuth with redirect flow (separate from contributor popup flow) |
+| **Session** | Stored in localStorage, 24h expiry, token in URL fragment on first redirect |
+| **Create site** | Modal form: repo (owner/repo), branch, allowed origins → generates `sk_xxx` + embed snippet |
+| **Site cards** | Each site shows: repo, branch, key, embed snippet (copy button), allowed origins, created date |
+| **Copy snippet** | One-click copy of the `<script>` embed tag |
+| **Manage origins** | Add/remove allowed origins per site inline |
+| **Delete site** | Confirmation prompt → removes site and invalidates the key |
 | **Opaque key** | Client-side script only knows `sk_xxx`, never the repo name |
+| **Limits** | Max 20 sites per owner (prototype) |
 
 ---
 
@@ -192,7 +208,7 @@ For each text change, the editor captures:
 - [x] Rich context capture (DOM path, classes, section, siblings)
 - [x] AI agent: grep repo → Claude finds source → edit → PR
 - [x] Site key system (opaque, server-side config)
-- [ ] Site owner onboarding (dashboard UI)
+- [x] Site owner onboarding (dashboard UI)
 - [ ] PostgreSQL storage (replace JSON files)
 - [x] Session expiry (24h TTL)
 - [x] Origin validation (only allow edits from registered domains)
