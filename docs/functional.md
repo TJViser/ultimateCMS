@@ -175,26 +175,34 @@ For each text change, the editor captures:
 
 ### Pricing Tiers (Proposed)
 
-| Tier | Price | Limits |
-|------|-------|--------|
-| **Free** | $0/mo | 1 site, 10 edits/month, 1 contributor |
-| **Pro** | $19/mo | 5 sites, unlimited edits, 5 contributors |
-| **Team** | $49/mo | Unlimited sites, unlimited edits, unlimited contributors, priority support |
-| **Enterprise** | Custom | Self-hosted option, GitLab support, SSO, audit logs |
+| Tier | Price | Sites | Edits/month | Contributors | AI Isolation |
+|------|-------|-------|-------------|--------------|-------------|
+| **Free** | $0/mo | 1 | 10 | 1 | Shared pool |
+| **Pro** | $19/mo | 10 | Unlimited | 10 per site | Shared pool |
+| **Team** | $49/mo | Unlimited | Unlimited | Unlimited | Dedicated container |
+| **Enterprise** | Custom | Unlimited | Unlimited | Unlimited | Self-hosted (BYOAI) |
+
+**Free → Pro upgrade trigger:** the user connects a second site. They've already validated the value on their first site — the upgrade is a natural expansion moment.
+
+**Pro → Team upgrade trigger:** security/compliance needs. The client wants their code processed by an isolated AI instance, not shared with other customers.
+
+**Team → Enterprise upgrade trigger:** the client's code must never leave their infrastructure. Banks, healthcare, government.
 
 ### What's Gated
 
-- Number of sites (site keys)
+- **Number of sites** (site keys) — the primary gate between Free and Pro
 - Number of edits per month (API calls to `/api/edit`)
 - Number of contributors per site
-- Advanced features: custom PR templates, Slack notifications, approval workflows
+- AI isolation level (shared → dedicated → self-hosted)
+- Advanced features: custom PR templates, Slack notifications, approval workflows, SSO, audit logs
 
 ### Revenue Levers
 
 - The site key system makes metering trivial (count API calls per `sk_xxx`)
 - GitHub OAuth identifies unique contributors
 - The AI agent cost (Claude API) scales with usage — passed through in pricing
-- Self-hosted / on-premise for enterprise customers
+- Dedicated AI containers for Team tier = predictable margin
+- Self-hosted / BYOAI for enterprise = license fee, no infra cost for us
 
 ---
 

@@ -23,11 +23,10 @@ module UltimateCMS
 
     # Search for text across the repo
     def search_code(query)
-      # GitHub code search API
       res = @conn.get('/search/code', {
         q: "#{query} repo:#{@owner}/#{@repo}"
       })
-      raise "GitHub search error: #{res.body}" unless res.success?
+      raise "GitHub search failed (#{res.status})" unless res.success?
       res.body['items'] || []
     end
 
@@ -38,7 +37,6 @@ module UltimateCMS
       raise "File not found: #{path}" unless res.success?
 
       content = Base64.decode64(res.body['content'])
-      # Handle UTF-8 encoding
       content.force_encoding('UTF-8')
 
       {
@@ -51,7 +49,7 @@ module UltimateCMS
     # Get the repo tree (list all files)
     def get_tree
       res = @conn.get("/repos/#{@owner}/#{@repo}/git/trees/#{@branch}", { recursive: 1 })
-      raise "Cannot read repo tree: #{res.body}" unless res.success?
+      raise "Cannot read repo tree (#{res.status})" unless res.success?
 
       res.body['tree']
         .select { |f| f['type'] == 'blob' }
@@ -61,7 +59,7 @@ module UltimateCMS
     # Get the latest commit SHA for the branch
     def get_branch_sha
       res = @conn.get("/repos/#{@owner}/#{@repo}/git/ref/heads/#{@branch}")
-      raise "Cannot read branch: #{res.body}" unless res.success?
+      raise "Cannot read branch (#{res.status})" unless res.success?
       res.body['object']['sha']
     end
 
@@ -71,7 +69,7 @@ module UltimateCMS
       res = @conn.post("/repos/#{@owner}/#{@repo}/git/refs") do |req|
         req.body = { ref: "refs/heads/#{name}", sha: sha }
       end
-      raise "Cannot create branch: #{res.body}" unless res.success?
+      raise "Cannot create branch (#{res.status})" unless res.success?
       name
     end
 
@@ -86,7 +84,7 @@ module UltimateCMS
           branch: branch
         }
       end
-      raise "Cannot update file #{path}: #{res.body}" unless res.success?
+      raise "Cannot update file (#{res.status})" unless res.success?
       res.body
     end
 
@@ -101,7 +99,7 @@ module UltimateCMS
           base: base
         }
       end
-      raise "Cannot create PR: #{res.body}" unless res.success?
+      raise "Cannot create PR (#{res.status})" unless res.success?
       res.body['html_url']
     end
   end
