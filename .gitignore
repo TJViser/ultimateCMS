@@ -1,0 +1,17 @@
+# Environment
+.env
+
+# Dependencies
+vendor/bundle/
+.bundle/
+
+# Data (runtime state — contains tokens and secrets)
+data/
+
+# OS
+.DS_Store
+
+# Editor
+*.swp
+*.swo
+*~
